@@ -7,15 +7,17 @@ from openai import OpenAI
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 import uvicorn
-
-# Load environment variables
-dotenv.load_dotenv()
+from typing import List
 
 # Configure loguru
-logger.add("request_logs.log", rotation="7 day",level="INFO", encoding="utf-8")
-
+logger.add("file_{time}.log", rotation="7 day")
+# Load environment variables
 app = FastAPI()
 
+try:
+    dotenv.load_dotenv()
+except ImportError:
+    logger.info("No environment variables found")
 # Set up CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -35,12 +37,12 @@ class RequestData(BaseModel):
     messages: list[Message]
     stream: bool = False
 
-# Initialize OpenAI client
-token = os.environ.get("GITHUB_TOKEN")
-if not token:
-    logger.error("GITHUB_TOKEN environment variable not set")
-    raise RuntimeError("GITHUB_TOKEN environment variable not set")
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: str | List[str]
 
+# Initialize OpenAI client
+token = os.environ["GITHUB_TOKEN"]
 endpoint = "https://models.inference.ai.azure.com"
 client = OpenAI(
     base_url=endpoint,
@@ -53,26 +55,22 @@ async def root():
     return {"message": "Hello World"}
 
 @app.post("/v1/chat/completions")
-async def say_hello(request_data: RequestData):
-    logger.info(f"Received request: {request_data}")
+async def chat_completions(request_data: RequestData):
+    logger.info(f"Received chat request: {request_data}")
     try:
         if request_data.stream:
             # Define an asynchronous generator for streaming response
             async def event_stream():
-                try:
-                    stream_response = client.chat.completions.create(
-                        model=request_data.model,
-                        messages=[message.dict() for message in request_data.messages],
-                        stream=True
-                    )
-                    for update in stream_response:
-                        content = update.choices[0].delta.content if update.choices[0].delta.content else ""
-                        if content:
-                            logger.debug(f"Streaming update: {content}")
-                        yield f"data: {update.json()}\n\n"
-                except Exception as stream_err:
-                    logger.error(f"Streaming error: {stream_err}")
-                    yield f"data: {{'error': '{str(stream_err)}'}}\n\n"
+                stream_response = client.chat.completions.create(
+                    model=request_data.model,
+                    messages=[message.dict() for message in request_data.messages],
+                    stream=True
+                )
+                logger.info("Response:\n")
+                for update in stream_response:
+                    content = update.choices[0].delta.content if update.choices[0].delta.content else ""
+                    logger.info(f"{content}")
+                    yield f"data: {update.json()}\n\n"
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
         else:
@@ -85,7 +83,21 @@ async def say_hello(request_data: RequestData):
             logger.info(f"Response: {response}")
             return response
     except Exception as err:
-        logger.error(f"Error occurred: {err}")
+        logger.error(f"Error occurred in chat completion: {err}")
+        raise HTTPException(status_code=500, detail=str(err))
+
+@app.post("/v1/embeddings")
+async def create_embedding(request_data: EmbeddingRequest):
+    logger.info(f"Received embedding request: {request_data}")
+    try:
+        response = client.embeddings.create(
+            model=request_data.model,
+            input=request_data.input
+        )
+        logger.info(f"Embedding created successfully")
+        return response
+    except Exception as err:
+        logger.error(f"Error occurred in embedding creation: {err}")
         raise HTTPException(status_code=500, detail=str(err))
 
 if __name__ == "__main__":
